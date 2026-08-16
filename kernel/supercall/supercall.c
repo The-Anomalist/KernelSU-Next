@@ -12,6 +12,225 @@
 #include <linux/version.h>
 #include <linux/utsname.h> // utsname() and uts_sem
 
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs.h>
+
+#define SUSFS_MAGIC 0xFAFAFAFA
+#define SUSFS_REPORT_BUFSIZE 16
+#define SUSFS_ENABLED_FEATURES_SIZE 8192
+
+struct ksu_susfs_version {
+	char version[SUSFS_REPORT_BUFSIZE];
+	int err;
+};
+
+struct ksu_susfs_variant {
+	char variant[SUSFS_REPORT_BUFSIZE];
+	int err;
+};
+
+struct ksu_susfs_enabled_features {
+	char features[SUSFS_ENABLED_FEATURES_SIZE];
+	int err;
+};
+
+/*
+ * sys_reboot operational ABI used by the installed universal ksu_susfs
+ * helper. Keep this definition wire-compatible with userspace: bool
+ * enabled followed by the naturally aligned int err.
+ */
+#ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
+struct ksu_susfs_log_v2000 {
+	bool enabled;
+	int err;
+};
+#endif
+
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+struct ksu_susfs_sus_path_v2000_new {
+	char target_pathname[SUSFS_MAX_LEN_PATHNAME];
+	int err;
+};
+#endif
+
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+struct ksu_susfs_sus_kstat_v2000 {
+	bool is_statically;
+	unsigned long target_ino;
+	char target_pathname[SUSFS_MAX_LEN_PATHNAME];
+	unsigned long spoofed_ino;
+	unsigned long spoofed_dev;
+	unsigned int spoofed_nlink;
+	long long spoofed_size;
+	long spoofed_atime_tv_sec;
+	long spoofed_mtime_tv_sec;
+	long spoofed_ctime_tv_sec;
+	long spoofed_atime_tv_nsec;
+	long spoofed_mtime_tv_nsec;
+	long spoofed_ctime_tv_nsec;
+	unsigned long spoofed_blksize;
+	unsigned long long spoofed_blocks;
+	int err;
+};
+
+static void ksu_susfs_kstat_to_legacy(struct st_susfs_sus_kstat *out,
+	const struct ksu_susfs_sus_kstat_v2000 *in)
+{
+	memset(out, 0, sizeof(*out));
+	out->is_statically = in->is_statically ? 1 : 0;
+	out->target_ino = in->target_ino;
+	strscpy(out->target_pathname, in->target_pathname, sizeof(out->target_pathname));
+	out->spoofed_ino = in->spoofed_ino;
+	out->spoofed_dev = in->spoofed_dev;
+	out->spoofed_nlink = in->spoofed_nlink;
+	out->spoofed_size = in->spoofed_size;
+	out->spoofed_atime_tv_sec = in->spoofed_atime_tv_sec;
+	out->spoofed_mtime_tv_sec = in->spoofed_mtime_tv_sec;
+	out->spoofed_ctime_tv_sec = in->spoofed_ctime_tv_sec;
+	out->spoofed_atime_tv_nsec = in->spoofed_atime_tv_nsec;
+	out->spoofed_mtime_tv_nsec = in->spoofed_mtime_tv_nsec;
+	out->spoofed_ctime_tv_nsec = in->spoofed_ctime_tv_nsec;
+	out->spoofed_blksize = in->spoofed_blksize;
+	out->spoofed_blocks = in->spoofed_blocks;
+}
+#endif
+
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+struct ksu_susfs_sus_mount_v2000 {
+	struct st_susfs_sus_mount info;
+	int err;
+};
+#endif
+
+#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
+struct ksu_susfs_try_umount_v2000 {
+	struct st_susfs_try_umount info;
+	int err;
+};
+#endif
+
+#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+struct ksu_susfs_uname_v2000 {
+	struct st_susfs_uname info;
+	int err;
+};
+#endif
+
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+struct ksu_susfs_open_redirect_v2000 {
+	struct st_susfs_open_redirect info;
+	int err;
+};
+#endif
+
+#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+#define KSU_SUSFS_REBOOT_CMDLINE_SIZE 8192
+struct ksu_susfs_cmdline_v2000 {
+	char fake_cmdline_or_bootconfig[KSU_SUSFS_REBOOT_CMDLINE_SIZE];
+	int err;
+};
+#endif
+
+static int ksu_susfs_return_err(void __user *arg, size_t offset, int err)
+{
+	if (copy_to_user((char __user *)arg + offset, &err, sizeof(err)))
+		return -EFAULT;
+
+	return 0;
+}
+
+static int ksu_susfs_show_version(void __user *arg)
+{
+	struct ksu_susfs_version out = { .err = 0 };
+
+	strlcpy(out.version, SUSFS_VERSION, sizeof(out.version));
+	return copy_to_user(arg, &out, sizeof(out)) ? -EFAULT : 0;
+}
+
+static int ksu_susfs_show_variant(void __user *arg)
+{
+	struct ksu_susfs_variant out = { .err = 0 };
+
+	strlcpy(out.variant, SUSFS_VARIANT, sizeof(out.variant));
+	return copy_to_user(arg, &out, sizeof(out)) ? -EFAULT : 0;
+}
+
+static int ksu_susfs_show_enabled_features(void __user *arg)
+{
+	struct ksu_susfs_enabled_features *out;
+	size_t len = 0;
+	int ret;
+
+	out = kzalloc(sizeof(*out), GFP_KERNEL);
+	if (!out)
+		return -ENOMEM;
+
+#define KSU_SUSFS_ADD_FEATURE(_name) \
+	do { \
+		if (len < sizeof(out->features)) \
+			len += scnprintf(out->features + len, \
+					 sizeof(out->features) - len, "%s\n", (_name)); \
+	} while (0)
+
+	KSU_SUSFS_ADD_FEATURE("SUSFS");
+#ifdef CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
+	KSU_SUSFS_ADD_FEATURE("MAGIC_MOUNT");
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	KSU_SUSFS_ADD_FEATURE("SUS_PATH");
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	KSU_SUSFS_ADD_FEATURE("SUS_MOUNT");
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT_MNT_ID_REORDER
+	KSU_SUSFS_ADD_FEATURE("SUS_MOUNT_MNT_ID_REORDER");
+#endif
+#ifdef CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
+	KSU_SUSFS_ADD_FEATURE("AUTO_ADD_SUS_KSU_DEFAULT_MOUNT");
+#endif
+#ifdef CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
+	KSU_SUSFS_ADD_FEATURE("AUTO_ADD_SUS_BIND_MOUNT");
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+	KSU_SUSFS_ADD_FEATURE("SUS_KSTAT");
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_OVERLAYFS
+	KSU_SUSFS_ADD_FEATURE("SUS_OVERLAYFS");
+#endif
+#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
+	KSU_SUSFS_ADD_FEATURE("TRY_UMOUNT");
+#endif
+#ifdef CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT
+	KSU_SUSFS_ADD_FEATURE("AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT");
+#endif
+#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+	KSU_SUSFS_ADD_FEATURE("SPOOF_UNAME");
+#endif
+#ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
+	KSU_SUSFS_ADD_FEATURE("ENABLE_LOG");
+#endif
+#ifdef CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+	KSU_SUSFS_ADD_FEATURE("HIDE_KSU_SUSFS_SYMBOLS");
+#endif
+#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+	KSU_SUSFS_ADD_FEATURE("SPOOF_CMDLINE_OR_BOOTCONFIG");
+#endif
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+	KSU_SUSFS_ADD_FEATURE("OPEN_REDIRECT");
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_SU
+	KSU_SUSFS_ADD_FEATURE("SUS_SU");
+#endif
+
+#undef KSU_SUSFS_ADD_FEATURE
+
+	out->err = 0;
+	ret = copy_to_user(arg, out, sizeof(*out)) ? -EFAULT : 0;
+	kfree(out);
+	return ret;
+}
+#endif
+
 #include "uapi/supercall.h"
 #include "supercall/internal.h"
 #include "arch.h"
@@ -73,6 +292,169 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
 {
 	if (magic1 != KSU_INSTALL_MAGIC1)
 		return 0;
+
+#if defined(CONFIG_KSU_SUSFS) && defined(CONFIG_KSU_MANUAL_HOOK)
+	if (magic2 == SUSFS_MAGIC && current_uid().val == 0) {
+		int susfs_ret;
+
+		switch (cmd) {
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+		case CMD_SUSFS_ADD_SUS_PATH: {
+			struct ksu_susfs_sus_path_v2000_new path;
+			void __user *uarg = (void __user *)*arg;
+			if (copy_from_user(&path, uarg, sizeof(path))) {
+				susfs_ret = -EFAULT;
+				break;
+			}
+			path.target_pathname[SUSFS_MAX_LEN_PATHNAME - 1] = '\0';
+			path.err = susfs_add_sus_path_from_kernel(path.target_pathname);
+			if (copy_to_user(uarg, &path, sizeof(path)))
+				susfs_ret = -EFAULT;
+			else
+				susfs_ret = 0;
+			break;
+		}
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+		case CMD_SUSFS_ADD_SUS_KSTAT:
+		case CMD_SUSFS_ADD_SUS_KSTAT_STATICALLY:
+		case CMD_SUSFS_UPDATE_SUS_KSTAT: {
+			struct ksu_susfs_sus_kstat_v2000 wire;
+			struct st_susfs_sus_kstat legacy;
+			void __user *uarg = (void __user *)*arg;
+			int err;
+			if (copy_from_user(&wire, uarg, sizeof(wire))) {
+				susfs_ret = -EFAULT;
+				break;
+			}
+			wire.target_pathname[SUSFS_MAX_LEN_PATHNAME - 1] = '\0';
+			ksu_susfs_kstat_to_legacy(&legacy, &wire);
+			if (cmd == CMD_SUSFS_ADD_SUS_KSTAT_STATICALLY)
+				legacy.is_statically = 1;
+			if (cmd == CMD_SUSFS_UPDATE_SUS_KSTAT)
+				err = susfs_update_sus_kstat_from_kernel(&legacy);
+			else
+				err = susfs_add_sus_kstat_from_kernel(&legacy);
+			wire.err = err;
+			if (copy_to_user(uarg, &wire, sizeof(wire)))
+				susfs_ret = -EFAULT;
+			else
+				susfs_ret = 0;
+			break;
+		}
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+		case CMD_SUSFS_ADD_SUS_MOUNT: {
+			void __user *uarg = (void __user *)*arg;
+			int err;
+
+			err = susfs_add_sus_mount(
+				(struct st_susfs_sus_mount __user *)uarg);
+			susfs_ret = ksu_susfs_return_err(
+				uarg,
+				offsetof(struct ksu_susfs_sus_mount_v2000, err),
+				err);
+			break;
+		}
+#endif
+#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
+		case CMD_SUSFS_ADD_TRY_UMOUNT: {
+			void __user *uarg = (void __user *)*arg;
+			int err;
+
+			err = susfs_add_try_umount(
+				(struct st_susfs_try_umount __user *)uarg);
+			susfs_ret = ksu_susfs_return_err(
+				uarg,
+				offsetof(struct ksu_susfs_try_umount_v2000, err),
+				err);
+			break;
+		}
+#endif
+#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+		case CMD_SUSFS_SET_UNAME: {
+			void __user *uarg = (void __user *)*arg;
+			int err;
+
+			err = susfs_set_uname(
+				(struct st_susfs_uname __user *)uarg);
+			susfs_ret = ksu_susfs_return_err(
+				uarg,
+				offsetof(struct ksu_susfs_uname_v2000, err),
+				err);
+			break;
+		}
+#endif
+#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+		case CMD_SUSFS_SET_CMDLINE_OR_BOOTCONFIG: {
+			void __user *uarg = (void __user *)*arg;
+			int err;
+
+			/*
+			 * v1.5.5 consumes only its legacy 4096-byte payload.
+			 * The reboot ABI reserves 8192 bytes before the trailing err.
+			 */
+			err = susfs_set_cmdline_or_bootconfig((char __user *)uarg);
+			susfs_ret = ksu_susfs_return_err(
+				uarg, offsetof(struct ksu_susfs_cmdline_v2000, err),
+				err);
+			break;
+		}
+#endif
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+		case CMD_SUSFS_ADD_OPEN_REDIRECT: {
+			void __user *uarg = (void __user *)*arg;
+			int err;
+
+			err = susfs_add_open_redirect(
+				(struct st_susfs_open_redirect __user *)uarg);
+			susfs_ret = ksu_susfs_return_err(
+				uarg,
+				offsetof(struct ksu_susfs_open_redirect_v2000, err),
+				err);
+			break;
+		}
+#endif
+#ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
+		case CMD_SUSFS_ENABLE_LOG: {
+			struct ksu_susfs_log_v2000 log;
+			void __user *uarg = (void __user *)*arg;
+
+			if (copy_from_user(&log, uarg, sizeof(log))) {
+				susfs_ret = -EFAULT;
+				break;
+			}
+
+			susfs_set_log(log.enabled);
+			log.err = 0;
+
+			if (copy_to_user(uarg, &log, sizeof(log)))
+				susfs_ret = -EFAULT;
+			else
+				susfs_ret = 0;
+			break;
+		}
+#endif
+		case CMD_SUSFS_SHOW_VERSION:
+			susfs_ret = ksu_susfs_show_version((void __user *)*arg);
+			break;
+		case CMD_SUSFS_SHOW_ENABLED_FEATURES:
+			susfs_ret =
+				ksu_susfs_show_enabled_features((void __user *)*arg);
+			break;
+		case CMD_SUSFS_SHOW_VARIANT:
+			susfs_ret = ksu_susfs_show_variant((void __user *)*arg);
+			break;
+		default:
+			return -EINVAL;
+		}
+
+		if (susfs_ret)
+			pr_err("susfs cmd 0x%x failed: %d\n",
+			       cmd, susfs_ret);
+		return 0;
+	}
+#endif
 
 #ifdef CONFIG_KSU_DEBUG
 	pr_info("sys_reboot: intercepted call! magic: 0x%x id: %d\n", magic1,
