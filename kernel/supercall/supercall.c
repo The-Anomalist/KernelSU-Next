@@ -131,14 +131,6 @@ struct ksu_susfs_cmdline_v2000 {
 };
 #endif
 
-static int ksu_susfs_return_err(void __user *arg, size_t offset, int err)
-{
-	if (copy_to_user((char __user *)arg + offset, &err, sizeof(err)))
-		return -EFAULT;
-
-	return 0;
-}
-
 static int ksu_susfs_show_version(void __user *arg)
 {
 	struct ksu_susfs_version out = { .err = 0 };
@@ -345,73 +337,80 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
 #endif
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 		case CMD_SUSFS_ADD_SUS_MOUNT: {
+			struct ksu_susfs_sus_mount_v2000 wire;
 			void __user *uarg = (void __user *)*arg;
-			int err;
 
-			err = susfs_add_sus_mount(
-				(struct st_susfs_sus_mount __user *)uarg);
-			susfs_ret = ksu_susfs_return_err(
-				uarg,
-				offsetof(struct ksu_susfs_sus_mount_v2000, err),
-				err);
+			if (copy_from_user(&wire, uarg, sizeof(wire))) {
+				susfs_ret = -EFAULT;
+				break;
+			}
+			wire.info.target_pathname[SUSFS_MAX_LEN_PATHNAME - 1] = '\0';
+			wire.err = susfs_add_sus_mount_from_kernel(&wire.info);
+			susfs_ret = copy_to_user(uarg, &wire, sizeof(wire)) ? -EFAULT : 0;
 			break;
 		}
 #endif
 #ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
 		case CMD_SUSFS_ADD_TRY_UMOUNT: {
+			struct ksu_susfs_try_umount_v2000 wire;
 			void __user *uarg = (void __user *)*arg;
-			int err;
 
-			err = susfs_add_try_umount(
-				(struct st_susfs_try_umount __user *)uarg);
-			susfs_ret = ksu_susfs_return_err(
-				uarg,
-				offsetof(struct ksu_susfs_try_umount_v2000, err),
-				err);
+			if (copy_from_user(&wire, uarg, sizeof(wire))) {
+				susfs_ret = -EFAULT;
+				break;
+			}
+			wire.info.target_pathname[SUSFS_MAX_LEN_PATHNAME - 1] = '\0';
+			wire.err = susfs_add_try_umount_from_kernel(&wire.info);
+			susfs_ret = copy_to_user(uarg, &wire, sizeof(wire)) ? -EFAULT : 0;
 			break;
 		}
 #endif
 #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
 		case CMD_SUSFS_SET_UNAME: {
+			struct ksu_susfs_uname_v2000 wire;
 			void __user *uarg = (void __user *)*arg;
-			int err;
 
-			err = susfs_set_uname(
-				(struct st_susfs_uname __user *)uarg);
-			susfs_ret = ksu_susfs_return_err(
-				uarg,
-				offsetof(struct ksu_susfs_uname_v2000, err),
-				err);
+			if (copy_from_user(&wire, uarg, sizeof(wire))) {
+				susfs_ret = -EFAULT;
+				break;
+			}
+			wire.info.release[__NEW_UTS_LEN] = '\0';
+			wire.info.version[__NEW_UTS_LEN] = '\0';
+			wire.err = susfs_set_uname_from_kernel(&wire.info);
+			susfs_ret = copy_to_user(uarg, &wire, sizeof(wire)) ? -EFAULT : 0;
 			break;
 		}
 #endif
 #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
 		case CMD_SUSFS_SET_CMDLINE_OR_BOOTCONFIG: {
+			struct ksu_susfs_cmdline_v2000 *wire;
 			void __user *uarg = (void __user *)*arg;
-			int err;
 
-			/*
-			 * v1.5.5 consumes only its legacy 4096-byte payload.
-			 * The reboot ABI reserves 8192 bytes before the trailing err.
-			 */
-			err = susfs_set_cmdline_or_bootconfig((char __user *)uarg);
-			susfs_ret = ksu_susfs_return_err(
-				uarg, offsetof(struct ksu_susfs_cmdline_v2000, err),
-				err);
+			wire = memdup_user(uarg, sizeof(*wire));
+			if (IS_ERR(wire)) {
+				susfs_ret = PTR_ERR(wire);
+				break;
+			}
+			wire->fake_cmdline_or_bootconfig[KSU_SUSFS_REBOOT_CMDLINE_SIZE - 1] = '\0';
+			wire->err = susfs_set_cmdline_or_bootconfig_from_kernel(wire->fake_cmdline_or_bootconfig);
+			susfs_ret = copy_to_user(uarg, wire, sizeof(*wire)) ? -EFAULT : 0;
+			kfree(wire);
 			break;
 		}
 #endif
 #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
 		case CMD_SUSFS_ADD_OPEN_REDIRECT: {
+			struct ksu_susfs_open_redirect_v2000 wire;
 			void __user *uarg = (void __user *)*arg;
-			int err;
 
-			err = susfs_add_open_redirect(
-				(struct st_susfs_open_redirect __user *)uarg);
-			susfs_ret = ksu_susfs_return_err(
-				uarg,
-				offsetof(struct ksu_susfs_open_redirect_v2000, err),
-				err);
+			if (copy_from_user(&wire, uarg, sizeof(wire))) {
+				susfs_ret = -EFAULT;
+				break;
+			}
+			wire.info.target_pathname[SUSFS_MAX_LEN_PATHNAME - 1] = '\0';
+			wire.info.redirected_pathname[SUSFS_MAX_LEN_PATHNAME - 1] = '\0';
+			wire.err = susfs_add_open_redirect_from_kernel(&wire.info);
+			susfs_ret = copy_to_user(uarg, &wire, sizeof(wire)) ? -EFAULT : 0;
 			break;
 		}
 #endif
