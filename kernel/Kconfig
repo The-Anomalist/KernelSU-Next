@@ -79,21 +79,6 @@ config KSU_SUSFS_SUS_MOUNT
 	depends on KSU_SUSFS
 	default y
 
-config KSU_SUSFS_SUS_MOUNT_MNT_ID_REORDER
-	bool "SUSFS mount ID reorder support"
-	depends on KSU_SUSFS_SUS_MOUNT
-	default y
-
-config KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
-	bool "SUSFS auto add KernelSU default mounts"
-	depends on KSU_SUSFS_SUS_MOUNT
-	default y
-
-config KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
-	bool "SUSFS auto add bind mounts"
-	depends on KSU_SUSFS_SUS_MOUNT
-	default y
-
 config KSU_SUSFS_SUS_KSTAT
 	bool "SUSFS kstat spoofing"
 	depends on KSU_SUSFS
@@ -102,16 +87,6 @@ config KSU_SUSFS_SUS_KSTAT
 config KSU_SUSFS_SUS_OVERLAYFS
 	bool "SUSFS overlayfs support"
 	depends on KSU_SUSFS
-	default y
-
-config KSU_SUSFS_TRY_UMOUNT
-	bool "SUSFS try umount support"
-	depends on KSU_SUSFS
-	default y
-
-config KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT
-	bool "SUSFS auto add try-umount for bind mounts"
-	depends on KSU_SUSFS_TRY_UMOUNT
 	default y
 
 config KSU_SUSFS_SPOOF_UNAME
@@ -139,4 +114,14 @@ config KSU_SUSFS_OPEN_REDIRECT
 	depends on KSU_SUSFS
 	default y
 	
+
+config KSU_SUSFS_SUS_MAP
+	bool "Enable to hide some mmapped real file from different proc maps interfaces"
+	depends on KSU_SUSFS
+	default y
+	help
+	  - Allow hiding mmapped real file from /proc/<pid>/[maps|smaps|smaps_rollup|map_files|mem|pagemap]
+	  - It does NOT support hiding for anon memory.
+	  - It does NOT hide any inline hooks or plt hooks caused by the injected library itself.
+
 endmenu
