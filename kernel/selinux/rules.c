@@ -23,6 +23,7 @@
 #include "linux/lsm_audit.h" // IWYU pragma: keep
 #include "xfrm.h"
 #include "compat/kernel_compat.h"
+#include "policy_backup.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
 #define SELINUX_POLICY_INSTEAD_SELINUX_SS
@@ -219,6 +220,18 @@ out_unlock:
 	cpumask_t old_mask;
 	db = get_policydb();
 	rwlock_t *lock = ksu_get_policy_rwlock();
+
+	/*
+	 * Preserve the pristine SELinux policy before KernelSU mutates the
+	 * legacy in-place policydb.
+	 */
+	if (!ksu_get_backup_selinux_state()) {
+		int backup_ret = ksu_backup_selinux_policy();
+
+		if (backup_ret)
+			pr_warn("failed to backup SELinux policy: %d\n",
+				backup_ret);
+	}
 	
 	if (!lock)
 		goto do_stop_machine;
