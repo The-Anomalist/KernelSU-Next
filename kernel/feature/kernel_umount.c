@@ -9,6 +9,12 @@
 #include <linux/path.h>
 #include <linux/printk.h>
 #include <linux/types.h>
+
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs.h>
+#include <linux/susfs_def.h>
+#include <linux/workqueue.h>
+#endif
 #ifndef KSU_HAS_PATH_UMOUNT
 #include <linux/syscalls.h>
 #endif
@@ -113,6 +119,14 @@ static void umount_tw_func(struct callback_head *cb)
     up_read(&mount_list_lock);
 
 	revert_creds(saved);
+
+#ifdef CONFIG_KSU_SUSFS
+	susfs_set_current_proc_umounted();
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	/* Re-flag SUS_PATH entries after app-visible KSU mounts are removed. */
+	schedule_work(&susfs_extra_works);
+#endif
+#endif
 
 	kfree(tw);
 }
