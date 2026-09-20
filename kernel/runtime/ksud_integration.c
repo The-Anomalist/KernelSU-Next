@@ -56,6 +56,10 @@ static const char KERNEL_SU_RC[] =
 	"    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " services\n"
 	"\n"
 
+	"on zygote-start\n"
+	"    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " services\n"
+	"\n"
+
 	"on property:vold.decrypt=trigger_restart_framework\n"
 	"    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " services\n"
 	"\n"
