@@ -211,7 +211,7 @@ static void unhook_selinux_status_open(void)
 		return;
 }
 
-	patch_fops_slot(&ops->open, my_sel_open_handle_status);
+	patch_fops_slot(&ops->open, orig_sel_open_handle_status);
 	orig_sel_open_handle_status = NULL;
 	pr_info("ksu_selinux_hide: unhooked sel_handle_status_ops->open\n");
 }
@@ -317,7 +317,22 @@ static int ksu_hide_init_thread(void *data)
 	ksu_wait_stop_input_hook();
 #endif
 
+	/*
+	 * Do not hijack /sys/fs/selinux/context on legacy/manual-hook kernels.
+	 *
+	 * Android 17 zygote may already be running with the target app UID and
+	 * seccomp enabled while libselinux is still resolving/applying the final
+	 * app domain. Blocking all app-UID writes to the SELinux context
+	 * transaction file returns -EINVAL from selinux_android_setcontext() and
+	 * causes the zygote child to abort.
+	 *
+	 * The fake SELinux status page remains enabled, which preserves the safe
+	 * SELinux-hide behavior without interfering with legitimate context
+	 * transitions.
+	 */
+#if !defined(CONFIG_KSU_MANUAL_HOOK) || LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
 	hook_selinux_transaction_write();
+#endif
 
 	int tries = 0;
 try_again:
@@ -349,7 +364,9 @@ void __exit ksu_selinux_hide_exit(void)
 {
 	ksu_unregister_feature_handler(KSU_FEATURE_SELINUX_HIDE_STATUS);
 	unhook_selinux_status_open();
+#if !defined(CONFIG_KSU_MANUAL_HOOK) || LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
 	unhook_selinux_transaction_write();
+#endif
 	mutex_lock(&fake_status_init_mutex);
 	if (fake_status) {
 		__free_page(fake_status);
