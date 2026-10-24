@@ -12,6 +12,7 @@
 #endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)
 #include <linux/compiler_types.h>
+#else
 #include <linux/compiler.h>
 #endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
@@ -169,7 +170,7 @@ static long ksu_handle_execve_sucompat_common(const char __user **filename_user,
 	if (!ksu_is_allow_uid_for_current(current_uid().val))
 		goto do_orig_execve;
 
-	addr = untagged_addr((unsigned long)*filename_user);
+	addr = untagged_addr((unsigned long)READ_ONCE(*filename_user));
 	fn = (const char __user *)addr;
 	memset(path, 0, sizeof(path));
 
