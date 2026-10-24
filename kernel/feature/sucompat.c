@@ -244,35 +244,64 @@ long ksu_handle_execveat_sucompat_user(const char __user **filename_user, int or
 }
 
 int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
-				 void *__never_use_argv, void *__never_use_envp,
-				 int *__never_use_flags)
+                                 void *__never_use_argv, void *__never_use_envp,
+                                 int *flags)
 {
-	struct filename *filename;
-	const char su[] = SU_PATH;
-	static const char ksud_path[] = KSUD_PATH;
+	struct filename *filename, *ksud_name, *sh_name, *target;
+	struct file *file;
+	int ret;
 
-	if (unlikely(!filename_ptr))
+	if (!filename_ptr || IS_ERR_OR_NULL(*filename_ptr))
 		return 0;
 
-	if (!ksu_su_compat_enabled)
-		return 0;
-
-	if (!ksu_is_allow_uid_for_current(current_uid().val))
+	if (!ksu_su_compat_enabled ||
+	    !ksu_is_allow_uid_for_current(current_uid().val))
 		return 0;
 
 	filename = *filename_ptr;
-	if (IS_ERR(filename))
+	if (strcmp(filename->name, SU_PATH))
 		return 0;
 
-	if (likely(memcmp(filename->name, su, sizeof(su))))
-		return 0;
+	/*
+	 * Allocate both targets before changing credentials. Replace the
+	 * filename object rather than writing over its existing name.
+	 */
+	ksud_name = getname_kernel(KSUD_PATH);
+	if (IS_ERR(ksud_name))
+		return PTR_ERR(ksud_name);
 
-	pr_info("do_execveat_common su found\n");
-	memcpy((void *)filename->name, ksud_path, sizeof(ksud_path));
+	sh_name = getname_kernel(SH_PATH);
+	if (IS_ERR(sh_name)) {
+		ret = PTR_ERR(sh_name);
+		putname(ksud_name);
+		return ret;
+	}
 
-	escape_with_root_profile();
+	ret = escape_with_root_profile();
+	if (ret && !(ret == -EALREADY && current_euid().val == 0)) {
+		putname(ksud_name);
+		putname(sh_name);
+		return ret;
+	}
 
-	return 0;
+	file = ksu_filp_open_compat(KSUD_PATH, O_RDONLY, 0);
+	if (IS_ERR(file)) {
+		target = sh_name;
+		ret = 0;
+		putname(ksud_name);
+	} else {
+		filp_close(file, NULL);
+		target = ksud_name;
+		ret = 1;
+		putname(sh_name);
+	}
+
+	putname(filename);
+	*filename_ptr = target;
+	*fd = AT_FDCWD;
+	*flags = 0;
+	/* Positive result requests a session fd after successful ksud exec. */
+	return ret;
 }
 
 // sucompat: permitted process can execute 'su' to gain root access.
