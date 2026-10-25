@@ -9,6 +9,7 @@
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/version.h>
+#include <linux/workqueue.h>
 
 #include "policy/allowlist.h"
 #include "manager/apk_sign.h"
@@ -425,6 +426,19 @@ out_revert_cred:
 	mutex_unlock(&throne_tracker_mutex);
 }
 
+static void ksu_throne_scan_workfn(struct work_struct *work)
+{
+	track_throne(false);
+}
+
+static DECLARE_WORK(ksu_throne_scan_work, ksu_throne_scan_workfn);
+
+void ksu_queue_throne_scan(void)
+{
+	/* Coalesce notifications; never scan while a VFS callback holds locks. */
+	schedule_work(&ksu_throne_scan_work);
+}
+
 void __init ksu_throne_tracker_init()
 {
 	struct apk_path_hash *pos, *n;
@@ -437,5 +451,5 @@ void __init ksu_throne_tracker_init()
 
 void __exit ksu_throne_tracker_exit()
 {
-	// nothing to do
+	cancel_work_sync(&ksu_throne_scan_work);
 }

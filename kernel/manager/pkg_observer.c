@@ -6,7 +6,6 @@
 #include <linux/slab.h>
 #include <linux/rculist.h>
 #include <linux/sched.h>
-#include <linux/task_work.h>
 #include <linux/version.h>
 #include "klog.h" // IWYU pragma: keep
 #include "throne_tracker.h"
@@ -26,44 +25,7 @@ struct watch_dir {
 
 static struct fsnotify_group *g;
 
-/*
- * fsnotify fires from inside fsnotify_move(), i.e. still under the
- * down_write() that do_renameat2() took on /data/system->i_rwsem, and with
- * fsnotify_mark_srcu read-locked. track_throne() opens /data/system/packages
- * .list, which takes that same rwsem shared - the calling task then blocks
- * on its own write lock, forever, while holding throne_tracker_mutex so every
- * other caller queues behind it. Defer to task_work, which runs before the
- * syscall returns to userspace.
- */
-static void ksu_track_throne_tw_func(struct callback_head *cb)
-{
-	kfree(cb);
-	/* 4.14 kernel/exit.c runs exit_task_work() after exit_fs(). */
-	if (current->flags & PF_EXITING)
-		return;
-	track_throne(false);
-}
-
-static void ksu_defer_track_throne(void)
-{
-	struct callback_head *cb;
-
-	if (current->flags & PF_KTHREAD)
-		return;
-
-	cb = kzalloc(sizeof(*cb), GFP_KERNEL);
-	if (!cb) {
-		pr_warn("defer track_throne: alloc failed, skipping event\n");
-		return;
-	}
-
-	cb->func = ksu_track_throne_tw_func;
-	if (task_work_add(current, cb, TWA_RESUME)) {
-		kfree(cb);
-		pr_warn("defer track_throne: task_work_add failed, skipping event\n");
-	}
-}
-
+/* Package scans share the worker used by the LSM rename hook. */
 #include "pkg_observer_defs.h" // KSU_DECL_FSNOTIFY_OPS
 static KSU_DECL_FSNOTIFY_OPS(ksu_handle_inode_event)
 {
@@ -75,7 +37,7 @@ static KSU_DECL_FSNOTIFY_OPS(ksu_handle_inode_event)
 	    !memcmp(ksu_fname_arg(file_name), "packages.list", 13)) {
 		if (mask & (FS_CREATE | FS_MOVED_TO)) {
 			pr_info("packages.list detected: %d\n", mask);
-			ksu_defer_track_throne();
+			ksu_queue_throne_scan();
 		}
 	}
 	/* Only /data/adb has a "ksud"; keep sucompat's view of it current. */

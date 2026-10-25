@@ -20,6 +20,9 @@
 #include <linux/kref.h>
 #include <linux/namei.h>
 #include <linux/err.h>
+#include <linux/mm.h>
+#include <linux/mount.h>
+#include <linux/workqueue.h>
 
 #include "klog.h" // IWYU pragma: keep
 #include "ksu.h"
@@ -426,111 +429,172 @@ bool ksu_get_allow_list(int *array, u16 length, u16 *out_length, u16 *out_total,
 	return true;
 }
 
-// TODO: move to kernel thread or work queue
-static void allowlist_discard_partial_file(const char *path_str)
+/* All callers coalesce onto this worker; PID 1 never performs the file I/O. */
+#define KSU_ALLOWLIST_DIR "/data/adb/ksu"
+#define KSU_ALLOWLIST_NAME ".allowlist"
+#define KSU_ALLOWLIST_TMP_NAME ".allowlist.tmp"
+
+static int allowlist_unlink_tmp(struct path *parent, struct file *expected)
 {
-	struct path path;
+	struct dentry *dentry;
+	struct inode *dir = d_inode(parent->dentry);
+	int ret;
 
-	if (kern_path(path_str, LOOKUP_FOLLOW, &path))
-		return;
-
-	/*
-	 * d_parent is the only portable spelling here: dentry_parent() does
-	 * not exist on 4.14, and IS_ROOT() covers the self-referential root
-	 * so we never try to unlink "/".
-	 */
-	if (!d_is_dir(path.dentry) && !IS_ROOT(path.dentry) &&
-	    d_inode(path.dentry) && d_inode(path.dentry->d_parent))
-		vfs_unlink(d_inode(path.dentry->d_parent), path.dentry, NULL);
-
-	path_put(&path);
+	inode_lock(dir);
+	dentry = lookup_one_len(KSU_ALLOWLIST_TMP_NAME, parent->dentry,
+				sizeof(KSU_ALLOWLIST_TMP_NAME) - 1);
+	if (IS_ERR(dentry)) {
+		ret = PTR_ERR(dentry);
+		goto out_unlock;
+	}
+	if (d_is_negative(dentry)) {
+		ret = 0;
+	} else if (expected && dentry != expected->f_path.dentry) {
+		ret = -ESTALE;
+	} else {
+		ret = vfs_unlink(dir, dentry, NULL);
+	}
+	dput(dentry);
+out_unlock:
+	inode_unlock(dir);
+	return ret;
 }
 
-static void do_persistent_allow_list(struct callback_head *_cb)
+static int allowlist_commit_tmp(struct path *parent, struct file *expected)
 {
-    u32 magic = FILE_MAGIC;
-    u32 version = FILE_FORMAT_VERSION;
-    struct perm_data *p = NULL;
-    loff_t off = 0;
-    int i;
+	struct dentry *old, *new;
+	struct inode *dir = d_inode(parent->dentry);
+	int ret;
 
-    const struct cred *saved = override_creds(ksu_cred);
-    struct file *fp =
-        filp_open(KERNEL_SU_ALLOWLIST, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (IS_ERR(fp)) {
-        pr_err("save_allow_list create file failed: %ld\n", PTR_ERR(fp));
-        goto out;
-    }
-
-	// store magic and version
-	if (ksu_kernel_write_compat(fp, &magic, sizeof(magic), &off) !=
-	    sizeof(magic)) {
-		pr_err("save_allow_list write magic failed.\n");
-		goto close_file;
+	/* Same-directory rename; hold the parent exclusively for both lookups. */
+	lock_rename(parent->dentry, parent->dentry);
+	old = lookup_one_len(KSU_ALLOWLIST_TMP_NAME, parent->dentry,
+			     sizeof(KSU_ALLOWLIST_TMP_NAME) - 1);
+	if (IS_ERR(old)) {
+		ret = PTR_ERR(old);
+		goto out_unlock;
 	}
-
-	if (ksu_kernel_write_compat(fp, &version, sizeof(version), &off) !=
-	    sizeof(version)) {
-		pr_err("save_allow_list write version failed.\n");
-		goto close_file;
+	if (d_is_negative(old) || old != expected->f_path.dentry) {
+		ret = -ESTALE;
+		goto out_old;
 	}
-
-    mutex_lock(&allowlist_mutex);
-    hash_for_each (allow_list, i, p, list) {
-        pr_info("save allow list, name: %s uid :%d, allow: %d\n", p->profile.key, p->profile.curr_uid,
-                p->profile.allow_su);
-
-        /*
-         * The file was opened with O_TRUNC, so a short write (ENOSPC/EIO)
-         * leaves a still-magic-valid but truncated list that the next boot
-         * happily parses - silently dropping every profile after the failure
-         * point. Bail out and unlink instead of persisting a partial list.
-         */
-        if (ksu_kernel_write_compat(fp, &p->profile, sizeof(p->profile), &off) !=
-            sizeof(p->profile)) {
-            pr_err("save_allow_list write profile failed, list truncated\n");
-            mutex_unlock(&allowlist_mutex);
-            filp_close(fp, 0);
-            allowlist_discard_partial_file(KERNEL_SU_ALLOWLIST);
-            goto out;
-        }
-    }
-    mutex_unlock(&allowlist_mutex);
-
-close_file:
-    filp_close(fp, 0);
-out:
-    revert_creds(saved);
-    kfree(_cb);
+	new = lookup_one_len(KSU_ALLOWLIST_NAME, parent->dentry,
+			     sizeof(KSU_ALLOWLIST_NAME) - 1);
+	if (IS_ERR(new)) {
+		ret = PTR_ERR(new);
+		goto out_old;
+	}
+	ret = vfs_rename(dir, old, dir, new, NULL, 0);
+	dput(new);
+out_old:
+	dput(old);
+out_unlock:
+	unlock_rename(parent->dentry, parent->dentry);
+	return ret;
 }
 
-void ksu_persistent_allow_list()
+static int allowlist_write_all(struct file *file, const void *data,
+			       size_t size, loff_t *pos)
 {
-	struct task_struct *tsk;
+	const char *cursor = data;
+	ssize_t written;
 
-	rcu_read_lock();
-	tsk = get_pid_task(find_vpid(1), PIDTYPE_PID);
-	if (!tsk) {
-		rcu_read_unlock();
-		pr_err("save_allow_list find init task err\n");
+	while (size) {
+		written = ksu_kernel_write_compat(file, cursor, size, pos);
+		if (written <= 0)
+			return written ? (int)written : -EIO;
+		cursor += written;
+		size -= written;
+	}
+	return 0;
+}
+
+static void do_persistent_allow_list(struct work_struct *work)
+{
+	const u32 magic = FILE_MAGIC;
+	const u32 version = FILE_FORMAT_VERSION;
+	struct app_profile *profiles;
+	struct perm_data *p;
+	struct path parent;
+	struct file *fp, *directory;
+	const struct cred *saved;
+	loff_t off = 0;
+	size_t count = 0;
+	int i, ret;
+
+	/* Snapshot under the list mutex; do not hold it during storage I/O. */
+	mutex_lock(&allowlist_mutex);
+	profiles = kvmalloc_array(max_t(size_t, allow_list_count, 1),
+				 sizeof(*profiles), GFP_KERNEL);
+	if (profiles) {
+		hash_for_each(allow_list, i, p, list)
+			memcpy(&profiles[count++], &p->profile, sizeof(*profiles));
+	}
+	mutex_unlock(&allowlist_mutex);
+	if (!profiles) {
+		pr_err("save_allow_list: snapshot allocation failed\n");
 		return;
 	}
-	rcu_read_unlock();
 
-	struct callback_head *cb =
-		kzalloc(sizeof(struct callback_head), GFP_KERNEL);
-	if (!cb) {
-		pr_err("save_allow_list alloc cb err\b");
-		goto put_task;
-	}
-	cb->func = do_persistent_allow_list;
-	if (task_work_add(tsk, cb, TWA_RESUME)) {
-		kfree(cb);
-		pr_warn("save_allow_list add task_work failed\n");
-	}
+	saved = override_creds(ksu_cred);
+	ret = kern_path(KSU_ALLOWLIST_DIR, LOOKUP_FOLLOW | LOOKUP_DIRECTORY,
+			&parent);
+	if (ret)
+		goto out_creds;
+	ret = mnt_want_write(parent.mnt);
+	if (ret)
+		goto out_path;
 
-put_task:
-	put_task_struct(tsk);
+	/* A leftover staging file can remain after an interrupted prior boot. */
+	ret = allowlist_unlink_tmp(&parent, NULL);
+	if (ret)
+		goto out_write;
+	fp = file_open_root(parent.dentry, parent.mnt, KSU_ALLOWLIST_TMP_NAME,
+			    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
+	if (IS_ERR(fp)) {
+		ret = PTR_ERR(fp);
+		goto out_write;
+	}
+	ret = allowlist_write_all(fp, &magic, sizeof(magic), &off);
+	if (!ret)
+		ret = allowlist_write_all(fp, &version, sizeof(version), &off);
+	if (!ret)
+		ret = allowlist_write_all(fp, profiles,
+					 count * sizeof(*profiles), &off);
+	if (!ret)
+		ret = vfs_fsync(fp, 0);
+	if (!ret)
+		ret = allowlist_commit_tmp(&parent, fp);
+	if (ret)
+		allowlist_unlink_tmp(&parent, fp);
+	filp_close(fp, NULL);
+	if (!ret) {
+		/* Persist the replacement directory entry as well as its contents. */
+		directory = dentry_open(&parent, O_RDONLY | O_DIRECTORY,
+				       current_cred());
+		if (IS_ERR(directory)) {
+			ret = PTR_ERR(directory);
+		} else {
+			ret = vfs_fsync(directory, 0);
+			filp_close(directory, NULL);
+		}
+	}
+out_write:
+	mnt_drop_write(parent.mnt);
+out_path:
+	path_put(&parent);
+out_creds:
+	revert_creds(saved);
+	kvfree(profiles);
+	if (ret)
+		pr_err("save_allow_list: persistence failed: %d\n", ret);
+}
+
+static DECLARE_WORK(allowlist_save_work, do_persistent_allow_list);
+
+void ksu_persistent_allow_list(void)
+{
+	schedule_work(&allowlist_save_work);
 }
 
 static void migrate_profile(u32 version, struct app_profile *profile)
@@ -674,6 +738,8 @@ void __exit ksu_allowlist_exit(void)
 	struct perm_data *np = NULL;
 	struct hlist_node *tmp;
 	int i;
+
+	cancel_work_sync(&allowlist_save_work);
 
 	// free allowlist
 	mutex_lock(&allowlist_mutex);

@@ -3,7 +3,6 @@
 #include <linux/version.h>
 #include <linux/binfmts.h>
 #include <linux/err.h>
-#include <linux/atomic.h>
 
 #include "klog.h" // IWYU pragma: keep
 #include "runtime/ksud_boot.h"
@@ -84,17 +83,8 @@ static int ksu_inode_rename(struct inode *old_dir, struct dentry *old_dentry,
 	pr_debug("renameat: %s -> %s, new path: %s\n", old_dentry->d_name.name,
 		new_dentry->d_name.name, buf);
 
-	// Thread-safe execution using atomic operations to prevent race conditions
-	// if system_server threads execute this hook concurrently.
-	static atomic_t first_time = ATOMIC_INIT(1);
-
-	// atomic_xchg swaps the value to 0 and returns the old value.
-	// If the old value was 1, we are the first thread to reach here.
-	if (atomic_xchg(&first_time, 0) == 1) {
-		track_throne(true);
-	} else {
-		track_throne(false);
-	}
+	/* VFS still holds the rename directory locks here. */
+	ksu_queue_throne_scan();
 
 	return 0;
 }

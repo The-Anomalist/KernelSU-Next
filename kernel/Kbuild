@@ -86,6 +86,11 @@ $(info -- KernelSU-Next Git repo detected at: $(GIT_ROOT))
 endif
 endif
 
+# Singularity legacy backport release identity.
+# Commit counts on this branch differ from the upstream release history.
+KSU_VERSION_OVERRIDE ?= 33355
+KSU_VERSION_TAG_OVERRIDE ?= v3.4.2
+
 # Calculate version if git version is available
 ifdef KSU_GIT_VERSION_VALID
 $(eval KSU_VERSION=$(shell expr 30000 + $(KSU_GIT_VERSION) + 289))
